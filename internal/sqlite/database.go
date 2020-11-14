@@ -17,12 +17,16 @@ type Database struct {
 	name string
 	w    *stdsql.DB
 	r    *stdsql.DB
+
+	schemas map[string]sql.Schema
 }
 
 var (
 	_ sql.Database     = (*Database)(nil)
 	_ sql.TableCreator = (*Database)(nil)
 	_ sql.TableDropper = (*Database)(nil)
+	// _ sql.ViewCreator  = (*Database)(nil)
+	// _ sql.ViewDropper = (*Database)(nil)
 	// _ sql.TableRenamer = (*Database)(nil)
 )
 
@@ -66,9 +70,10 @@ func NewDatabase(name, dsn string) (*Database, error) {
 	r.SetMaxIdleConns(10)
 	r.SetConnMaxLifetime(-1)
 	return &Database{
-		name: name,
-		w:    w,
-		r:    r,
+		name:    name,
+		w:       w,
+		r:       r,
+		schemas: map[string]sql.Schema{},
 	}, nil
 }
 
@@ -76,7 +81,35 @@ func (db *Database) Name() string {
 	return db.name
 }
 
-func (db *Database) GetTableInsensitive(ctx *sql.Context, tblName string) (sql.Table, bool, error) {
+func (db *Database) GetTableInsensitive(ctx *sql.Context, tblName string) (table sql.Table, ok bool, err error) {
+	// defer func() {
+	// 	ss, ok := db.schemas[tblName]
+	// 	if ok {
+	// 		// return &Table{
+	// 		// 	name:   tblName,
+	// 		// 	schema: ss,
+	// 		// 	dbw:    db.w,
+	// 		// 	dbr:    db.r,
+	// 		// }, true, nil
+	// 		fmt.Println("GetTableInsensitive:", tblName)
+	// 		if !ss.Equals(table.Schema()) {
+	// 			fmt.Println("Schema's not equal!")
+	// 		}
+	// 		// for _, col := range table.Schema() {
+	// 		// 	debugColumn(col)
+	// 		// }
+	// 	}
+	// }()
+	ss, ok := db.schemas[tblName]
+	if ok {
+		return &Table{
+			name:   tblName,
+			schema: ss,
+			dbw:    db.w,
+			dbr:    db.r,
+		}, true, nil
+	}
+
 	rows, err := db.r.QueryContext(ctx,
 		`SELECT 
 			name, type, pk, nullable, dflt_value, comment, num_unsigned, num_length, num_scale, txt_charset, txt_collate, enum_vals 
@@ -135,10 +168,6 @@ func (db *Database) GetTableInsensitive(ctx *sql.Context, tblName string) (sql.T
 			}
 			ct.EnumValues = enumVals
 		}
-		var dflt *string
-		if dfltValue.Valid {
-			dflt = &dfltValue.String
-		}
 		colType, err := ColumnTypeToType(&ct)
 		if err != nil {
 			return nil, false, err
@@ -146,7 +175,6 @@ func (db *Database) GetTableInsensitive(ctx *sql.Context, tblName string) (sql.T
 		col := sql.Column{
 			Name:       name,
 			Type:       colType,
-			Default:    dflt,
 			Nullable:   nullable,
 			Source:     tblName,
 			PrimaryKey: pk,
@@ -161,6 +189,12 @@ func (db *Database) GetTableInsensitive(ctx *sql.Context, tblName string) (sql.T
 		}
 		schema = append(schema, &col)
 	}
+
+	if len(schema) == 0 {
+		return nil, false, nil
+	}
+
+	db.schemas[tblName] = schema
 
 	return &Table{
 		name:   tblName,
@@ -189,7 +223,31 @@ func (db *Database) GetTableNames(ctx *sql.Context) ([]string, error) {
 	return tables, nil
 }
 
+func debugColumn(col *sql.Column) {
+	if strings.HasPrefix(col.Name, "debug_") {
+		fmt.Printf(".Name: %s\n", col.Name)
+		fmt.Printf(".Source: %s\n", col.Source)
+		fmt.Printf(".Comment: %s\n", col.Comment)
+		fmt.Printf(".Default: %+v\n", col.Default)
+		fmt.Printf(".Nullable: %+v\n", col.Nullable)
+		fmt.Printf(".PrimaryKey: %+v\n", col.PrimaryKey)
+		t := col.Type.(sql.StringType)
+		fmt.Printf(".Type.CharacterSet: %v\n", t.CharacterSet())
+		fmt.Printf(".Type.Collation: %v\n", t.Collation())
+		fmt.Printf(".Type.Promote: %v\n", t.Promote())
+		fmt.Printf(".Type.MaxByteLength: %v\n", t.MaxByteLength())
+		fmt.Printf(".Type.MaxCharacterLength: %v\n", t.MaxCharacterLength())
+		fmt.Printf(".Type.String: %v\n", t.String())
+		fmt.Printf(".Type.Type: %v\n", t.Type())
+		fmt.Printf(".Type.Zero: %v\n", t.Zero())
+	}
+}
+
 func (db *Database) CreateTable(ctx *sql.Context, name string, schema sql.Schema) error {
+	// fmt.Println("CreateTable:", name)
+	// for _, col := range schema {
+	// 	debugColumn(col)
+	// }
 	return inTx(ctx, db.w, func(tx *stdsql.Tx) error {
 		var (
 			defs []string
@@ -447,6 +505,9 @@ func (db *Database) CreateTable(ctx *sql.Context, name string, schema sql.Schema
 		if _, err := tx.Exec(fmt.Sprintf(`CREATE TABLE "%s" (%s)`, name, strings.Join(defs, ", "))); err != nil {
 			return err
 		}
+
+		db.schemas[name] = schema
+
 		return nil
 	})
 }
@@ -459,6 +520,7 @@ func (db *Database) DropTable(ctx *sql.Context, name string) error {
 		if _, err := tx.Exec(`DELETE FROM mysqlite_table_schema WHERE source = "` + name + `"`); err != nil {
 			return err
 		}
+		delete(db.schemas, name)
 		return nil
 	})
 }

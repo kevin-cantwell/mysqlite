@@ -152,6 +152,7 @@ github.com/liquidata-inc/go-mysql-server v0.6.0 h1:ZrygrPP//sNZSf9gj0oDgJVGe+N3w
 github.com/liquidata-inc/go-mysql-server v0.6.0/go.mod h1:W9+xQ7WUIqkPomN8Ng1eLPCG9SWNwKMvB+6IMwvShxo=
 github.com/liquidata-inc/vitess v0.0.0-20200807222445-2db8e9fb6365 h1:aR9yZQEOJ7Sij0xIXRPqyj78G8oOjesHm5YcuR25/cs=
 github.com/liquidata-inc/vitess v0.0.0-20200807222445-2db8e9fb6365/go.mod h1:E8nYT1vcL2NROtFwUN02CiA6cz276CFuB0Q1Zja5CAo=
+github.com/liquidata-inc/vitess v2.1.1+incompatible h1:2TBRo8/NcFrhOv78bTOqhib6Y+HFTTEXhQxnKVVYPG8=
 github.com/magiconair/properties v1.8.0/go.mod h1:PppfXfuXeibc/6YijjN8zIbojt8czPbwD3XqdrwzmxQ=
 github.com/mattn/go-runewidth v0.0.1/go.mod h1:LwmH8dsx7+W8Uxz3IHJYH5QSwggIsqBzpuz5H//U1FU=
 github.com/mattn/go-sqlite3 v1.14.4 h1:4rQjbDxdu9fSgI/r3KN72G3c2goxknAqHHgPWWs8UlI=

@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/liquidata-inc/go-mysql-server/sql"
-	"github.com/liquidata-inc/vitess/go/vt/proto/query"
+	"github.com/liquidata-inc/vitess/go/sqltypes"
 	"github.com/liquidata-inc/vitess/go/vt/sqlparser"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -280,176 +280,188 @@ func (db *Database) CreateTable(ctx *sql.Context, name string, schema sql.Schema
 				Comment:  col.Comment,
 			}
 
-			// TODO: These cases may overlap if the interface is not very specific.
-			//       You must switch on the base types, unfortunately.
-			switch t := col.Type.(type) {
-			case sql.EnumType:
-				charset := string(t.CharacterSet())
+			switch t := col.Type.Type(); t {
+			case sqltypes.Int8, sqltypes.Int16, sqltypes.Int24, sqltypes.Int32, sqltypes.Int64,
+				sqltypes.Uint8, sqltypes.Uint16, sqltypes.Uint24, sqltypes.Uint32, sqltypes.Uint64,
+				sqltypes.Float32, sqltypes.Float64:
+
+				castedType := col.Type.(sql.NumberType)
+				if castedType.IsFloat() {
+					def.Affinity = "REAL"
+				} else {
+					def.Affinity = "INTEGER"
+				}
+				unsigned := !castedType.IsSigned()
+				def.NumUnsigned = &unsigned
+				if col.Default != nil {
+					d, err := castedType.Convert(col.Default)
+					if err != nil {
+						return err
+					}
+					val := fmt.Sprintf("%v", d)
+					def.DefaultValue = &val
+				}
+			case sqltypes.Char, sqltypes.VarChar,
+				sqltypes.Binary, sqltypes.VarBinary,
+				sqltypes.Blob, sqltypes.Text:
+
+				def.Affinity = "TEXT"
+				castedType := col.Type.(sql.StringType)
+				charset := string(castedType.CharacterSet())
 				if len(charset) > 0 {
 					def.TxtCharset = &charset
 				}
-				collate := string(t.Collation())
+				length := castedType.MaxCharacterLength()
+				def.NumLength = &length
+				collate := string(castedType.Collation())
 				if len(collate) > 0 {
 					def.TxtCollate = &collate
 				}
-				b, err := json.Marshal(t.Values())
+				if col.Default != nil {
+					d, err := castedType.Convert(col.Default)
+					if err != nil {
+						return err
+					}
+					val := fmt.Sprintf("%s", d)
+					def.DefaultValue = &val
+				}
+			case sqltypes.Decimal:
+
+				def.Affinity = "NUMERIC"
+				castedType := col.Type.(sql.DecimalType)
+				length := int64(castedType.Precision())
+				scale := int64(castedType.Scale())
+				def.NumLength = &length
+				def.NumScale = &scale
+				if col.Default != nil {
+					d, err := castedType.Convert(col.Default)
+					if err != nil {
+						return err
+					}
+					val := fmt.Sprintf("%v", d)
+					def.DefaultValue = &val
+				}
+			case sqltypes.Enum:
+
+				def.Affinity = "TEXT"
+				castedType := col.Type.(sql.EnumType)
+				charset := string(castedType.CharacterSet())
+				if len(charset) > 0 {
+					def.TxtCharset = &charset
+				}
+				collate := string(castedType.Collation())
+				if len(collate) > 0 {
+					def.TxtCollate = &collate
+				}
+				b, err := json.Marshal(castedType.Values())
 				if err != nil {
 					return err
 				}
 				def.EnumVals = string(b)
 
 				if col.Default != nil {
-					d, err := t.Convert(col.Default)
+					d, err := castedType.Convert(col.Default)
 					if err != nil {
 						return err
 					}
 					val := fmt.Sprintf("%s", d)
 					def.DefaultValue = &val
 				}
-				def.Affinity = "TEXT"
-			case sql.StringType:
-				charset := string(t.CharacterSet())
-				if len(charset) > 0 {
-					def.TxtCharset = &charset
-				}
-				length := t.MaxCharacterLength()
-				def.NumLength = &length
-				collate := string(t.Collation())
-				if len(collate) > 0 {
-					def.TxtCollate = &collate
-				}
-				if col.Default != nil {
-					d, err := t.Convert(col.Default)
-					if err != nil {
-						return err
-					}
-					val := fmt.Sprintf("%s", d)
-					def.DefaultValue = &val
-				}
+			case sqltypes.Date, sqltypes.Datetime, sqltypes.Timestamp:
 
-				def.Affinity = "TEXT"
-			case sql.NumberType:
-				unsigned := !t.IsSigned()
-				def.NumUnsigned = &unsigned
+				def.Affinity = "TEXT" // Best known way to allow for fractional seconds in SQLite
+				castedType := col.Type.(sql.DatetimeType)
 				if col.Default != nil {
-					d, err := t.Convert(col.Default)
-					if err != nil {
-						return err
-					}
-					val := fmt.Sprintf("%v", d)
-					def.DefaultValue = &val
-				}
-				switch t.Type() {
-				case query.Type_INT8,
-					query.Type_INT16,
-					query.Type_INT24,
-					query.Type_INT32,
-					query.Type_INT64,
-					query.Type_UINT8,
-					query.Type_UINT16,
-					query.Type_UINT32,
-					query.Type_UINT64:
-					def.Affinity = "INTEGER"
-				case query.Type_FLOAT32,
-					query.Type_FLOAT64:
-					def.Affinity = "REAL"
-				default:
-					def.Affinity = "NUMERIC"
-				}
-			case sql.DecimalType:
-				length := int64(t.Precision())
-				scale := int64(t.Scale())
-				def.NumLength = &length
-				def.NumScale = &scale
-				if col.Default != nil {
-					d, err := t.Convert(col.Default)
-					if err != nil {
-						return err
-					}
-					val := fmt.Sprintf("%v", d)
-					def.DefaultValue = &val
-				}
-				def.Affinity = "NUMERIC"
-			case sql.DatetimeType:
-				if col.Default != nil {
-					d, err := t.ConvertWithoutRangeCheck(col.Default)
+					d, err := castedType.ConvertWithoutRangeCheck(col.Default)
 					if err != nil {
 						return err
 					}
 					val := d.Format("2006-01-02 15:04:05.999")
 					def.DefaultValue = &val
 				}
-				def.Affinity = "TEXT" // Best known way to allow for fractional seconds in SQLite
-			case sql.TimeType:
+			case sqltypes.Time:
+
+				def.Affinity = "INTEGER"
+				castedType := col.Type.(sql.TimeType)
 				if col.Default != nil {
-					d, err := t.Marshal(col.Default)
+					d, err := castedType.Marshal(col.Default)
 					if err != nil {
 						return err
 					}
 					val := fmt.Sprintf("%d", d)
 					def.DefaultValue = &val
 				}
+			case sqltypes.Year:
+
 				def.Affinity = "INTEGER"
-			case sql.SetType:
-				charset := string(t.CharacterSet())
+				castedType := col.Type.(sql.YearType)
+				if col.Default != nil {
+					d, err := castedType.Convert(col.Default)
+					if err != nil {
+						return err
+					}
+					val := fmt.Sprintf("%v", d)
+					def.DefaultValue = &val
+				}
+			case sqltypes.Set:
+
+				def.Affinity = "TEXT"
+				castedType := col.Type.(sql.SetType)
+				charset := string(castedType.CharacterSet())
 				if len(charset) > 0 {
 					def.TxtCharset = &charset
 				}
-				collate := string(t.Collation())
+				collate := string(castedType.Collation())
 				if len(collate) > 0 {
 					def.TxtCollate = &collate
 				}
-				b, err := json.Marshal(t.Values())
+				b, err := json.Marshal(castedType.Values())
 				if err != nil {
 					return err
 				}
 				def.EnumVals = string(b)
 
 				if col.Default != nil {
-					d, err := t.Convert(col.Default)
+					d, err := castedType.Convert(col.Default)
 					if err != nil {
 						return err
 					}
 					val := fmt.Sprintf("%s", d)
 					def.DefaultValue = &val
 				}
-				def.Affinity = "TEXT"
-			case sql.BitType:
+			case sqltypes.Bit:
+
+				def.Affinity = "INTEGER"
+				castedType := col.Type.(sql.BitType)
 				if col.Default != nil {
-					d, err := t.Convert(col.Default)
+					d, err := castedType.Convert(col.Default)
 					if err != nil {
 						return err
 					}
 					val := fmt.Sprintf("%d", d)
 					def.DefaultValue = &val
 				}
-				def.Affinity = "INTEGER"
+			case sqltypes.TypeJSON:
 
-			case sql.YearType:
+				def.Affinity = "TEXT"
+				castedType := col.Type.(sql.JsonType)
 				if col.Default != nil {
-					d, err := t.Convert(col.Default)
+					d, err := castedType.Convert(col.Default)
 					if err != nil {
 						return err
 					}
-					val := fmt.Sprintf("%d", d)
+					val := fmt.Sprintf("%v", d)
 					def.DefaultValue = &val
 				}
-				def.Affinity = "INTEGER"
-			case sql.NullType:
-				def.Affinity = "TEXT"
-			case sql.JsonType:
-				if col.Default != nil {
-					d, err := t.Convert(col.Default)
-					if err != nil {
-						return err
-					}
-					val := fmt.Sprintf("%s", d)
-					def.DefaultValue = &val
-				}
-				def.Affinity = "TEXT"
+			case sqltypes.Null:
 
+				def.Affinity = "TEXT"
+			case sqltypes.Expression, sqltypes.Geometry:
+
+				def.Affinity = "TEXT"
 			default:
-				panic("TODO")
+
+				panic("unknown sqltype: " + t.String())
 			}
 
 			// These strings are added to the CREATE TABLE statement

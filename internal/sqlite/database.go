@@ -11,6 +11,7 @@ import (
 	"github.com/liquidata-inc/vitess/go/sqltypes"
 	"github.com/liquidata-inc/vitess/go/vt/sqlparser"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/pkg/errors"
 )
 
 type Database struct {
@@ -82,24 +83,6 @@ func (db *Database) Name() string {
 }
 
 func (db *Database) GetTableInsensitive(ctx *sql.Context, tblName string) (table sql.Table, ok bool, err error) {
-	// defer func() {
-	// 	ss, ok := db.schemas[tblName]
-	// 	if ok {
-	// 		// return &Table{
-	// 		// 	name:   tblName,
-	// 		// 	schema: ss,
-	// 		// 	dbw:    db.w,
-	// 		// 	dbr:    db.r,
-	// 		// }, true, nil
-	// 		fmt.Println("GetTableInsensitive:", tblName)
-	// 		if !ss.Equals(table.Schema()) {
-	// 			fmt.Println("Schema's not equal!")
-	// 		}
-	// 		// for _, col := range table.Schema() {
-	// 		// 	debugColumn(col)
-	// 		// }
-	// 	}
-	// }()
 	ss, ok := db.schemas[tblName]
 	if ok {
 		return &Table{
@@ -244,10 +227,31 @@ func debugColumn(col *sql.Column) {
 }
 
 func (db *Database) CreateTable(ctx *sql.Context, name string, schema sql.Schema) error {
-	// fmt.Println("CreateTable:", name)
-	// for _, col := range schema {
-	// 	debugColumn(col)
-	// }
+	rowtimeIndex := schema.IndexOf("rowtime", name)
+	if rowtimeIndex < 0 {
+		schema = append([]*sql.Column{
+			{
+				Name:       "rowtime",
+				Type:       sql.Int64,
+				Nullable:   false,
+				Source:     name,
+				PrimaryKey: true,
+				Comment:    "rowtime represents insert time in unix nanoseconds",
+			},
+		}, schema...)
+		rowtimeIndex = 0
+	}
+	rowtimeCol := schema[rowtimeIndex]
+	if rowtimeCol.Type.Type() != sqltypes.Int64 {
+		return errors.Errorf("rowtime col must be of type BIGINT")
+	}
+	if rowtimeCol.Nullable {
+		return errors.Errorf("rowtime col may not be nullable")
+	}
+	if rowtimeCol.PrimaryKey {
+		return errors.Errorf("rowtime col must be a primary key")
+	}
+
 	return inTx(ctx, db.w, func(tx *stdsql.Tx) error {
 		var (
 			defs []string

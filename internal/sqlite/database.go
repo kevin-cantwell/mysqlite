@@ -83,6 +83,8 @@ func (db *Database) Name() string {
 }
 
 func (db *Database) GetTableInsensitive(ctx *sql.Context, tblName string) (table sql.Table, ok bool, err error) {
+	tblName = strings.ToLower(tblName)
+
 	ss, ok := db.schemas[tblName]
 	if ok {
 		return &Table{
@@ -206,26 +208,6 @@ func (db *Database) GetTableNames(ctx *sql.Context) ([]string, error) {
 	return tables, nil
 }
 
-func debugColumn(col *sql.Column) {
-	if strings.HasPrefix(col.Name, "debug_") {
-		fmt.Printf(".Name: %s\n", col.Name)
-		fmt.Printf(".Source: %s\n", col.Source)
-		fmt.Printf(".Comment: %s\n", col.Comment)
-		fmt.Printf(".Default: %+v\n", col.Default)
-		fmt.Printf(".Nullable: %+v\n", col.Nullable)
-		fmt.Printf(".PrimaryKey: %+v\n", col.PrimaryKey)
-		t := col.Type.(sql.StringType)
-		fmt.Printf(".Type.CharacterSet: %v\n", t.CharacterSet())
-		fmt.Printf(".Type.Collation: %v\n", t.Collation())
-		fmt.Printf(".Type.Promote: %v\n", t.Promote())
-		fmt.Printf(".Type.MaxByteLength: %v\n", t.MaxByteLength())
-		fmt.Printf(".Type.MaxCharacterLength: %v\n", t.MaxCharacterLength())
-		fmt.Printf(".Type.String: %v\n", t.String())
-		fmt.Printf(".Type.Type: %v\n", t.Type())
-		fmt.Printf(".Type.Zero: %v\n", t.Zero())
-	}
-}
-
 func (db *Database) CreateTable(ctx *sql.Context, name string, schema sql.Schema) error {
 	rowtimeIndex := schema.IndexOf("rowtime", name)
 	if rowtimeIndex < 0 {
@@ -233,10 +215,9 @@ func (db *Database) CreateTable(ctx *sql.Context, name string, schema sql.Schema
 			{
 				Name:       "rowtime",
 				Type:       sql.Int64,
-				Nullable:   false,
+				Nullable:   true,
 				Source:     name,
 				PrimaryKey: true,
-				Comment:    "rowtime represents insert time in unix nanoseconds",
 			},
 		}, schema...)
 		rowtimeIndex = 0
@@ -245,10 +226,11 @@ func (db *Database) CreateTable(ctx *sql.Context, name string, schema sql.Schema
 	if rowtimeCol.Type.Type() != sqltypes.Int64 {
 		return errors.Errorf("rowtime col must be of type BIGINT")
 	}
-	if rowtimeCol.Nullable {
-		return errors.Errorf("rowtime col may not be nullable")
+	if !rowtimeCol.Nullable {
+		return errors.Errorf("rowtime col must be nullable ")
 	}
-	if rowtimeCol.PrimaryKey {
+
+	if !rowtimeCol.PrimaryKey {
 		return errors.Errorf("rowtime col must be a primary key")
 	}
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/liquidata-inc/go-mysql-server/sql"
 )
@@ -141,7 +142,13 @@ func (i *rowInserter) Insert(ctx *sql.Context, row sql.Row) error {
 	phdr := make([]string, len(i.table.schema))
 	for i, col := range i.table.schema {
 		cols[i] = col.Name
-		phdr[i] = "?"
+		if col.Name == "rowtime" && row[i] == nil {
+			phdr[i] = fmt.Sprintf("%d", time.Now().UnixNano())
+			row = append(row[:i], row[i+1:]...)
+			fmt.Println("ROW:", row)
+		} else {
+			phdr[i] = "?"
+		}
 	}
 	statement := fmt.Sprintf(`INSERT INTO "%s" (%s) VALUES (%s)`, i.table.name, strings.Join(cols, ","), strings.Join(phdr, ","))
 	_, err := i.tx.ExecContext(ctx, statement, row...)

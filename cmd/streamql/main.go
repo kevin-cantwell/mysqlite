@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/kevin-cantwell/mysqlite/internal/sqlite"
@@ -17,6 +18,14 @@ import (
 	"github.com/liquidata-inc/vitess/go/vt/sqlparser"
 	_ "github.com/mattn/go-sqlite3"
 )
+
+var (
+	pid uint64
+)
+
+func nextPid() uint64 {
+	return atomic.AddUint64(&pid, 1)
+}
 
 func main() {
 	var (
@@ -43,14 +52,10 @@ func main() {
 
 	enc := json.NewEncoder(os.Stdout)
 
-	stmt, err := sqlparser.Parse(query)
-	if err != nil {
-		panic(err)
-	}
-
-	doQuery := func(stmt sqlparser.Statement) int {
-		fmt.Println("doQuery:", sqlparser.String(stmt))
-		_, rows, err := engine.Query(ctx, sqlparser.String(stmt))
+	doQuery := func(query string) int {
+		fmt.Println("doQuery:", query)
+		ctx := sql.NewContext(ctx, sql.WithPid(nextPid()))
+		_, rows, err := engine.Query(ctx, query)
 		if err != nil {
 			panic(err)
 		}
@@ -70,18 +75,26 @@ func main() {
 		}
 	}
 
+	stmt, err := sqlparser.Parse(query)
+	if err != nil {
+		panic(err)
+	}
 	switch stmt := stmt.(type) {
 	case *sqlparser.Select:
 		timer := time.NewTimer(time.Second)
 
-		origWhere := *stmt.Where
+		var origWhere *sqlparser.Where
+		if stmt.Where != nil {
+			*origWhere = *stmt.Where
+		}
 
 		tables := parseSelectTableNames(stmt)
+		fmt.Println("TABLES:", tables)
 		maxRowtimes := queryMaxRowTimes(ctx, engine, tables)
-		stmt.Where = setRowtimesLessEqualThan(&origWhere, maxRowtimes)
+		stmt.Where = setRowtimesLessEqualThan(origWhere, maxRowtimes)
 
 		// First query everything up to and including max rowtimes
-		if doQuery(stmt) == 0 {
+		if doQuery(sqlparser.String(stmt)) == 0 {
 			// if there's no results, wait a sec before trying again
 			select {
 			case <-ctx.Done():
@@ -105,14 +118,14 @@ func main() {
 				}
 			}
 
-			startingWhere := setRowtimesLessEqualThan(&origWhere, maxRowtimes)
+			startingWhere := setRowtimesLessEqualThan(origWhere, maxRowtimes)
 
 			// for each table in the query, fetch a new result set limited to new rows since the last iter
 			for _, table := range tables {
 				stmt.Where = setRowtimeGreaterThan(startingWhere, table, prevMaxRowtimes[table])
 				// For each table, query up to and including max rowtimes, but for this table only include
 				// new rows that arrivved since the last query.
-				if doQuery(stmt) == 0 {
+				if doQuery(sqlparser.String(stmt)) == 0 {
 					// if there's no results, wait a sec before trying again
 					select {
 					case <-ctx.Done():
@@ -125,7 +138,7 @@ func main() {
 			}
 		}
 	default:
-		doQuery(stmt)
+		doQuery(query)
 	}
 }
 
@@ -139,7 +152,7 @@ func createStreamDatabase(dataDir string) *sqlite.Database {
 	// return &sqlite.StreamDatabase{Database: db}
 }
 
-func maxRowtimesEqual(left map[string]int64, right map[string]int64) bool {
+func maxRowtimesEqual(left map[alias]int64, right map[alias]int64) bool {
 	if len(left) != len(right) {
 		return false
 	}
@@ -151,10 +164,11 @@ func maxRowtimesEqual(left map[string]int64, right map[string]int64) bool {
 	return true
 }
 
-func queryMaxRowTimes(ctx *sql.Context, engine *sqle.Engine, tables []string) map[string]int64 {
-	maxRowtimes := map[string]int64{}
+func queryMaxRowTimes(ctx *sql.Context, engine *sqle.Engine, tables []alias) map[alias]int64 {
+	maxRowtimes := map[alias]int64{}
 	for _, table := range tables {
-		_, rows, err := engine.Query(ctx, fmt.Sprintf("SELECT COALESCE(max(rowtime), 0) FROM \"%s\"", table))
+		ctx := sql.NewContext(ctx, sql.WithPid(nextPid()))
+		_, rows, err := engine.Query(ctx, fmt.Sprintf("SELECT COALESCE(max(rowtime), 0) FROM `%s`", table.name))
 		if err != nil {
 			panic(err)
 		}
@@ -165,18 +179,22 @@ func queryMaxRowTimes(ctx *sql.Context, engine *sqle.Engine, tables []string) ma
 			}
 			panic(err)
 		}
-		maxRowtimes[table] = row[0].(int64)
+		maxRowtimes[table] = sql.Int64.MustConvert(row[0]).(int64)
 	}
 	return maxRowtimes
 }
 
-func setRowtimeGreaterThan(where *sqlparser.Where, table string, rowtime int64) *sqlparser.Where {
+func setRowtimeGreaterThan(where *sqlparser.Where, table alias, rowtime int64) *sqlparser.Where {
+	name := table.as
+	if name == "" {
+		name = table.name
+	}
 	expr := &sqlparser.ComparisonExpr{
 		Operator: sqlparser.GreaterThanStr,
 		Left: &sqlparser.ColName{
 			Name: sqlparser.NewColIdent("rowtime"),
 			Qualifier: sqlparser.TableName{
-				Name: sqlparser.NewTableIdent(table),
+				Name: sqlparser.NewTableIdent(name),
 				// Qualifier: TODO, // database name
 			},
 		},
@@ -193,7 +211,7 @@ func setRowtimeGreaterThan(where *sqlparser.Where, table string, rowtime int64) 
 }
 
 // Modifies the WHERE clause of stmt to ensure that "table.rowtime <= $maxRowTime" for all tables
-func setRowtimesLessEqualThan(where *sqlparser.Where, maxRowtimes map[string]int64) *sqlparser.Where {
+func setRowtimesLessEqualThan(where *sqlparser.Where, maxRowtimes map[alias]int64) *sqlparser.Where {
 	if len(maxRowtimes) == 0 {
 		return where
 	}
@@ -202,13 +220,17 @@ func setRowtimesLessEqualThan(where *sqlparser.Where, maxRowtimes map[string]int
 
 	var comps []*sqlparser.ComparisonExpr
 	for table, rowtime := range maxRowtimes {
+		name := table.as
+		if name == "" {
+			name = table.name
+		}
 		// table.rowtime <= $rowtime
 		comp := &sqlparser.ComparisonExpr{
 			Operator: sqlparser.LessEqualStr,
 			Left: &sqlparser.ColName{
 				Name: sqlparser.NewColIdent("rowtime"),
 				Qualifier: sqlparser.TableName{
-					Name: sqlparser.NewTableIdent(table),
+					Name: sqlparser.NewTableIdent(name),
 					// Qualifier: TODO, // database name
 				},
 			},
@@ -235,8 +257,8 @@ func setRowtimesLessEqualThan(where *sqlparser.Where, maxRowtimes map[string]int
 	})
 }
 
-func parseSelectTableNames(stmt sqlparser.SelectStatement) []string {
-	var tables []string
+func parseSelectTableNames(stmt sqlparser.SelectStatement) []alias {
+	var tables []alias
 	switch stmt := stmt.(type) {
 	case *sqlparser.Union:
 		tables = append(tables, parseSelectTableNames(stmt.Left)...)
@@ -248,17 +270,20 @@ func parseSelectTableNames(stmt sqlparser.SelectStatement) []string {
 	default:
 		panic(fmt.Sprintf("unexpected SELECT type: %T", stmt))
 	}
-	return dedupStrings(tables)
+	return dedupAliases(tables)
 }
 
-func parseTableExprsNames(tt sqlparser.TableExprs) []string {
-	var tables []string
+func parseTableExprsNames(tt sqlparser.TableExprs) []alias {
+	var tables []alias
 	for _, t := range tt {
 		switch t := t.(type) {
 		case *sqlparser.AliasedTableExpr:
 			switch expr := t.Expr.(type) {
 			case sqlparser.TableName:
-				tables = append(tables, expr.Name.String())
+				tables = append(tables, alias{
+					name: expr.Name.String(),
+					as:   t.As.String(),
+				})
 			case *sqlparser.Subquery:
 				tables = append(tables, parseSelectTableNames(expr.Select)...)
 			}
@@ -272,14 +297,22 @@ func parseTableExprsNames(tt sqlparser.TableExprs) []string {
 	return tables
 }
 
-func dedupStrings(ss []string) []string {
-	var deduped []string
-	m := map[string]bool{}
+func dedupAliases(ss []alias) []alias {
+	var deduped []alias
+	m := map[alias]bool{}
 	for _, s := range ss {
+		if s.name == "dual" {
+			continue
+		}
 		m[s] = true
 	}
 	for s, _ := range m {
 		deduped = append(deduped, s)
 	}
 	return deduped
+}
+
+type alias struct {
+	name string
+	as   string
 }
